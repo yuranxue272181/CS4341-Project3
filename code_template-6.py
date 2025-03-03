@@ -27,8 +27,11 @@ import torch.nn as nn
 from tqdm.auto import tqdm
 
 # evaluation & visualization part
-import sklearn
+# import sklearn
+# import seaborn as sns
+import sklearn.metrics as metrics
 import seaborn as sns
+import numpy as np
 
 ################################################################################
 # Get Data
@@ -60,7 +63,7 @@ After getting the dataset, can use dataset.classes to get the class names: ['ang
 ## If you want to show some image samples
 
 # Image dir
-image_dir = "./fer_2013_train/train"
+image_dir = "./fer_2013_train/fer_2013_train/train"
 
 # Images from all classes
 class_folders = [folder for folder in os.listdir(image_dir) if os.path.isdir(os.path.join(image_dir, folder))]
@@ -130,6 +133,11 @@ train_transforms = transforms.Compose([
     ###################################
     ###################################
     # You may do some transforms here #
+    # *
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+
     ###################################
     ###################################
 
@@ -154,7 +162,28 @@ class Classifier(nn.Module):
         super(Classifier, self).__init__()
         
         # You may have some your own layers here
+        # *
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
 
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
         # self.layer_1 = ...
         # self.layer_2 = ...
         # self.layer_more = ...
@@ -166,6 +195,14 @@ class Classifier(nn.Module):
         self.fc_layer_for_output = nn.Linear(128 * 128, num_classes)
         # If you are using Linear + Sigmoid as the output layer, then BCELoss() can be used to get the loss
         # To know more about criterion, please check PyTorch official site
+        # *
+        self.fc_layers = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(256 * 8 * 8, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
 
     # forward() defines how the input data flows through the layers of the model during the forward pass
     def forward(self, x):
@@ -176,10 +213,14 @@ class Classifier(nn.Module):
         # out_2 = self.layer_2(out_1)
         # x = self.layer_more(out_2)
         # ...
+        # *
+        x = self.conv_layers(x)
+        x = self.fc_layers(x)
+        return x
 
-        flattened = self.layer_flatten(x)
-        output = self.fc_layer_for_output(flattened)
-        return output
+        # flattened = self.layer_flatten(x)
+        # output = self.fc_layer_for_output(flattened)
+        # return output
 
 ################################################################################
 # Configurations (*)
@@ -204,17 +245,79 @@ model = Classifier().to(device)
 ###########################################################################################
 ###########################################################################################
 
+
+# #given by professor
+# # The number of batch size
+# batch_size = 64
+#
+# # The number of training epochs
+# n_epochs = 5
+#
+# # Set up the criterion, we usually use cross-entropy as the measurement of classification performance
+# criterion = nn.CrossEntropyLoss()
+#
+# # Initialize optimizer, you can try different hyperparameters or different types of optimizer
+# optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
+
+#configuration 1: Increase the number of epochs and use a different optimizer
 # The number of batch size
-batch_size = 64
+# batch_size = 64
+#
+# # The number of training epochs
+# n_epochs = 20  # Increased number of epochs for more training
+#
+# # Set up the criterion
+# criterion = nn.CrossEntropyLoss()
+#
+# # Initialize optimizer with a lower learning rate and weight decay (for regularization)
+# optimizer = torch.optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-5)  # Adding weight decay for better generalization
+
+#configuration 2: Try using SGD optimizer with momentum
+# The number of batch size
+batch_size = 128  # Increased batch size to speed up training
 
 # The number of training epochs
-n_epochs = 5
+n_epochs = 10  # Moderate number of epochs
 
-# Set up the criterion, we usually use cross-entropy as the measurement of classification performance
+# Set up the criterion
 criterion = nn.CrossEntropyLoss()
 
-# Initialize optimizer, you can try different hyperparameters or different types of optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
+# Initialize optimizer with SGD and momentum
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)  # Using SGD with momentum for better convergence
+
+#Configuration 3: Use a learning rate scheduler
+# # The number of batch size
+# batch_size = 32  # Smaller batch size for better generalization
+#
+# # The number of training epochs
+# n_epochs = 15  # Moderate number of epochs
+#
+# # Set up the criterion
+# criterion = nn.CrossEntropyLoss()
+#
+# # Initialize optimizer with a higher learning rate and add learning rate scheduler
+# optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+#
+# # Learning rate scheduler that reduces learning rate when the validation loss plateaus
+# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3, factor=0.5, verbose=True)
+
+# Configuration 4: Use a different loss function and batch normalization
+# # The number of batch size
+# batch_size = 64
+#
+# # The number of training epochs
+# n_epochs = 25  # Increased number of epochs to train longer
+#
+# # Set up the criterion with Label Smoothing Cross-Entropy
+# criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Label smoothing for better generalization
+#
+# # Initialize optimizer with Adam
+# optimizer = torch.optim.Adam(model.parameters(), lr=0.0003)
+#
+# # Batch normalization in the model for better convergence
+# model.add_module('batch_norm', nn.BatchNorm1d(num_features=model.num_features))  # Assuming model has `num_features`
+
+
 
 ################################################################################
 # Dataloader 
@@ -236,7 +339,7 @@ For more infomation about data and dataloader, please refer to the PyTorch websi
 
 # Construct train datasets
 # The argument "loader" tells how torchvision reads the data.
-train_dir = "./fer_2013_train/train"
+train_dir = "./fer_2013_train/fer_2013_train/train"
 
 # We use ImageFolder to read the images and set the annotations for each image
 # Do not use train_transforms for this step, since the validation data should not have data augmantation
@@ -290,8 +393,12 @@ Basically, you don't need to change anything for this part. However, you should 
 
 For more infomation about training a model, please refer to PyTorch website: https://pytorch.org/tutorials/beginner/introyt/trainingyt.html#training-with-pytorch
 '''
-# Record the best validation acc to save the best model
+# *Record the best validation acc to save the best model
 best_acc = 0
+train_losses = []
+val_losses = []
+train_accuracies = []
+val_accuracies = []
 
 for epoch in range(n_epochs):
 
@@ -335,6 +442,9 @@ for epoch in range(n_epochs):
 
     train_loss = sum(train_loss) / len(train_loss)
     train_acc = sum(train_accs) / len(train_accs)
+    # *
+    train_losses.append(train_loss)
+    train_accuracies.append(train_acc)
 
     # Print the information.
     print(f"[ Train | {epoch + 1:03d}/{n_epochs:03d} ] loss = {train_loss:.5f}, acc = {train_acc:.5f}")
@@ -372,6 +482,9 @@ for epoch in range(n_epochs):
     # The average loss and accuracy for entire validation set is the average of the recorded values.
     valid_loss = sum(valid_loss) / len(valid_loss)
     valid_acc = sum(valid_accs) / len(valid_accs)
+    #*
+    val_losses.append(valid_loss)
+    val_accuracies.append(valid_acc)
 
     # Print the information.
     print(f"[ Valid | {epoch + 1:03d}/{n_epochs:03d} ] loss = {valid_loss:.5f}, acc = {valid_acc:.5f}")
@@ -403,7 +516,7 @@ We keep part of the test data and we’ll run your best performing model to dete
 
 # Construct test datasets
 # The argument "loader" tells how torchvision reads the data.
-test_dir = "./fer_2013_test/test"
+test_dir = "./fer_2013_test/fer_2013_test/test"
 
 # We use ImageFolder to read the images and set the annotations for each image
 test_dataset = ImageFolder(test_dir, transform=test_transforms)
@@ -463,6 +576,15 @@ with torch.no_grad():
     ##########################
     ##########################
     # Your code to implement #
+epochs_range = range(n_epochs)
+plt.figure(figsize=(12, 6))
+plt.plot(epochs_range, train_accuracies, label='Training Accuracy')
+plt.plot(epochs_range, val_accuracies, label='Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.title('Training and Validation Accuracy')
+plt.legend()
+plt.show()
     ##########################
     ##########################     
 
@@ -473,6 +595,16 @@ with torch.no_grad():
     ##########################
     ##########################
     # Your code to implement #
+confusion_matrix = metrics.confusion_matrix(true_labels, predictions)
+plt.figure(figsize=(10, 8))
+sns.heatmap(confusion_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=desired_class_order, yticklabels=desired_class_order)
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
+plt.title('Confusion Matrix')
+plt.show()
+
+print(metrics.classification_report(true_labels, predictions, target_names=desired_class_order))
+
     ##########################
     ##########################
 
@@ -483,5 +615,22 @@ with torch.no_grad():
     ##########################
     ##########################
     # Your code to implement #
+misclassified_indices = np.where(np.array(predictions) != np.array(true_labels))[0]
+misclassified_images = []
+
+for idx in misclassified_indices[:3]:
+    img_path, true_label = test_dataset.samples[idx]
+    predicted_label = predictions[idx]
+
+    image = Image.open(img_path).convert('L')
+    misclassified_images.append((image, true_label, predicted_label))
+
+plt.figure(figsize=(15, 5))
+for i, (img, true_label, predicted_label) in enumerate(misclassified_images):
+    plt.subplot(1, 3, i + 1)
+    plt.imshow(img, cmap='gray')
+    plt.title(f"True: {desired_class_order[true_label]}, Predicted: {desired_class_order[predicted_label]}")
+    plt.axis('off')
+plt.show()
     ##########################
     ##########################
