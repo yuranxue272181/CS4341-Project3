@@ -11,6 +11,10 @@ We will use PyTorch for the whole project. The Program Template is given, both p
 import os
 import random
 
+# Add matplotlib backend setting
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+
 # data part
 import torchvision.transforms as transforms
 from torchvision.datasets import ImageFolder
@@ -22,6 +26,7 @@ from torch.utils.data import random_split, Subset
 # model part
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # training & testing part
 from tqdm.auto import tqdm
@@ -62,37 +67,48 @@ After getting the dataset, can use dataset.classes to get the class names: ['ang
 
 ## If you want to show some image samples
 
+# Modify the image display part
+def show_sample_images(image_dir, save_path='sample_images.png'):
+    """
+    Show and save sample images from each class
+    """
+    # Images from all classes
+    class_folders = [folder for folder in os.listdir(image_dir) if os.path.isdir(os.path.join(image_dir, folder))]
+
+    # Random pick 1 image from every class
+    num_images = len(class_folders)
+    selected_images = []
+
+    for class_name in class_folders:
+        class_path = os.path.join(image_dir, class_name)
+        image_files = [f for f in os.listdir(class_path) if f.endswith(".jpg")]
+        if image_files:
+            selected_image = random.choice(image_files)
+            selected_images.append((os.path.join(class_path, selected_image), class_name))
+
+    # Create figure
+    fig, axes = plt.subplots(1, num_images, figsize=(20, 5))
+
+    for i, (img_path, img_class) in enumerate(selected_images):
+        image = Image.open(img_path)
+        axes[i].imshow(image, cmap="gray")
+        axes[i].axis("off")
+        axes[i].set_title(f"{img_class}\n{os.path.basename(img_path)}")
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Sample images saved to {save_path}")
+
 # Image dir
 image_dir = "./fer_2013_train/fer_2013_train/train"
 
-# Images from all classes
-class_folders = [folder for folder in os.listdir(image_dir) if os.path.isdir(os.path.join(image_dir, folder))]
-
-# Random pick 1 image from every class
-num_images = len(class_folders)
-selected_images = []
-
-for class_name in class_folders:
-  class_path = os.path.join(image_dir, class_name)
-  image_files = [f for f in os.listdir(class_path) if f.endswith(".jpg")]
-  if image_files:
-    selected_image = random.choice(image_files)
-    selected_images.append((os.path.join(class_path, selected_image), class_name))
-
-# Images show
-fig, axes = plt.subplots(1, num_images, figsize=(20, 5))
-
-for i, (img_path, img_class) in enumerate(selected_images):
-    image = Image.open(img_path)
-    axes[i].imshow(image, cmap="gray")
-    axes[i].axis("off")
-    # File name
-    axes[i].set_title(os.path.basename(img_path))
-    # File size
-    pos = axes[i].get_position()
-    fig.text(pos.x0 + pos.width / 2, pos.y0 - 0.05, f"class: {img_class}",
-             fontsize=10, ha="center")
-plt.show()
+# Show and save sample images
+try:
+    show_sample_images(image_dir)
+except Exception as e:
+    print(f"Warning: Could not display sample images. Error: {e}")
+    print("Continuing with training...")
 
 ################################################################################
 # Transforms (*)
@@ -112,38 +128,24 @@ Please check PyTorch official website for transforms details: https://pytorch.or
 # Usually we don't need augmentations in testing and also validation
 # But we still need to resize the PIL image and transform it into Tensor
 test_transforms = transforms.Compose([
-    # Turn the image into grayscale (1 channel)
     transforms.Grayscale(num_output_channels=1),
-    # Resize the image into a fixed shape (example for height = width = 128)
-    # You may need to try different image sizes to find the size fits your model best
-    transforms.Resize((128, 128)),
+    # Reduce image size from 128x128 to 64x64
+    transforms.Resize((64, 64)),
     transforms.ToTensor(),
-    # If you use normalization for the train_data, also need to normalize the test_data
+    # Add normalization to improve training stability
+    transforms.Normalize(mean=[0.5], std=[0.5])
 ])
 
 
 # Use train_transforms to implement data augmentation
 train_transforms = transforms.Compose([
-    # Turn the image into grayscale (1 channel)
     transforms.Grayscale(num_output_channels=1),
-    # Resize the image into a fixed shape (example for height = width = 128)
-    # You may need to try different image sizes to find the size fits your model best
-    transforms.Resize((128, 128)),
-
-    ###################################
-    ###################################
-    # You may do some transforms here #
-    # *
-    transforms.RandomHorizontalFlip(),
+    transforms.Resize((64, 64)),
+    # Keep effective augmentations only
+    transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomRotation(10),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-
-    ###################################
-    ###################################
-
-
-    # ToTensor() should be the last one of the transforms
     transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5], std=[0.5])
 ])
 
 ################################################################################
@@ -161,66 +163,42 @@ class Classifier(nn.Module):
     def __init__(self, num_classes=7):
         super(Classifier, self).__init__()
         
-        # You may have some your own layers here
-        # *
+        # Optimize model architecture for memory efficiency
         self.conv_layers = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            # First conv block
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            
+            # Second conv block
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.MaxPool2d(2),
+            
+            # Third conv block
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(2)
         )
-        # self.layer_1 = ...
-        # self.layer_2 = ...
-        # self.layer_more = ...
-        # ...
-        # Feel free to experiment with different layer combinations.
 
-        self.layer_flatten = nn.Flatten()
-        # For Linear output only, can use CrossEntropyLoss() for the loss (automatically apply Softmax)
-        self.fc_layer_for_output = nn.Linear(128 * 128, num_classes)
-        # If you are using Linear + Sigmoid as the output layer, then BCELoss() can be used to get the loss
-        # To know more about criterion, please check PyTorch official site
-        # *
+        # Calculate input features for fc layer
+        self.fc_input_size = 64 * 8 * 8
+
         self.fc_layers = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(256 * 8 * 8, 512),
+            nn.Linear(self.fc_input_size, 128),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Linear(512, num_classes)
+            nn.Linear(128, num_classes)
         )
 
-    # forward() defines how the input data flows through the layers of the model during the forward pass
     def forward(self, x):
-
-        # If you have your own layers added
-        # Don't forget to
-        # out_1 = self.layer_1(x)
-        # out_2 = self.layer_2(out_1)
-        # x = self.layer_more(out_2)
-        # ...
-        # *
         x = self.conv_layers(x)
         x = self.fc_layers(x)
         return x
-
-        # flattened = self.layer_flatten(x)
-        # output = self.fc_layer_for_output(flattened)
-        # return output
 
 ################################################################################
 # Configurations (*)
@@ -274,16 +252,21 @@ model = Classifier().to(device)
 
 #configuration 2: Try using SGD optimizer with momentum
 # The number of batch size
-batch_size = 128  # Increased batch size to speed up training
+batch_size = 32  # Reduced batch size to save memory
 
 # The number of training epochs
-n_epochs = 10  # Moderate number of epochs
+n_epochs = 15
 
 # Set up the criterion
 criterion = nn.CrossEntropyLoss()
 
-# Initialize optimizer with SGD and momentum
-optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)  # Using SGD with momentum for better convergence
+# Initialize optimizer with Adam and weight decay for regularization
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+
+# Add learning rate scheduler
+scheduler = ReduceLROnPlateau(optimizer, mode='max', 
+                            factor=0.5, patience=2, 
+                            verbose=True)
 
 #Configuration 3: Use a learning rate scheduler
 # # The number of batch size
@@ -409,36 +392,32 @@ for epoch in range(n_epochs):
     # These are used to record information in training.
     train_loss = []
     train_accs = []
-
+    
     for batch in tqdm(train_loader):
 
         # A batch consists of image data and corresponding labels.
         imgs, labels = batch
-
-        # Forward the data. (Make sure data and model are on the same device.)
-        # Automatically invokes the forward() method in your model class. 
-        # Make sure your model has a properly defined forward() method to handle data flow.
-        logits = model(imgs.to(device))
-
-        # Calculate the cross-entropy loss.
-        # We don't need to apply softmax before computing cross-entropy as it is done automatically.
-        loss = criterion(logits, labels.to(device))
-
-        # Gradients stored in the parameters in the previous step should be cleared out first.
+        imgs = imgs.to(device)
+        labels = labels.to(device)
+        
+        logits = model(imgs)
+        loss = criterion(logits, labels)
+        
         optimizer.zero_grad()
-
-        # Compute the gradients for parameters.
         loss.backward()
 
         # Update the parameters with computed gradients.
         optimizer.step()
-
-        # Compute the accuracy for current batch.
-        acc = (logits.argmax(dim=-1) == labels.to(device)).float().mean()
-
-        # Record the loss and accuracy.
+        
+        acc = (logits.argmax(dim=-1) == labels).float().mean()
+        
         train_loss.append(loss.item())
-        train_accs.append(acc)
+        train_accs.append(acc.item())
+        
+        # Clear variables to free memory
+        del imgs, labels, logits, loss
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     train_loss = sum(train_loss) / len(train_loss)
     train_acc = sum(train_accs) / len(train_accs)
@@ -497,6 +476,9 @@ for epoch in range(n_epochs):
         torch.save(model.state_dict(), save_path) 
         best_acc = valid_acc
 
+    # Update learning rate based on validation accuracy
+    scheduler.step(valid_acc)
+
 
 ################################################################################
 # Dataloader for Test
@@ -505,7 +487,7 @@ for epoch in range(n_epochs):
 We've used dataloader at the training phase, for testing part, the only difference is that we don't need to apply any data augmentation technique except for resize and ToTensor.
 -
 
-We keep part of the test data and we’ll run your best performing model to determine its accuracy on our own test set.
+We keep part of the test data and we'll run your best performing model to determine its accuracy on our own test set.
 '''
 
 # This is a command line code for Jupyter Notebook to unzip file
@@ -568,69 +550,73 @@ with torch.no_grad():
 # Evaluation & Visualizations (*)
 ################################################################################
 
-## Training & Validation Performance Plot
-# The plot should show how training accuracy and validation accuracy change over time during training. 
-# Graph number of training epochs (x-axis) versus training set and validation set accuracy (y-axis). 
-# Hence, your plot should contain two curves.
+def save_training_plot(train_accuracies, val_accuracies, save_path='training_plot.png'):
+    """Save training and validation accuracy plot"""
+    epochs_range = range(len(train_accuracies))
+    plt.figure(figsize=(12, 6))
+    plt.plot(epochs_range, train_accuracies, label='Training Accuracy')
+    plt.plot(epochs_range, val_accuracies, label='Validation Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Training plot saved to {save_path}")
 
-    ##########################
-    ##########################
-    # Your code to implement #
-epochs_range = range(n_epochs)
-plt.figure(figsize=(12, 6))
-plt.plot(epochs_range, train_accuracies, label='Training Accuracy')
-plt.plot(epochs_range, val_accuracies, label='Validation Accuracy')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.title('Training and Validation Accuracy')
-plt.legend()
-plt.show()
-    ##########################
-    ##########################     
+def save_confusion_matrix(true_labels, predictions, class_names, save_path='confusion_matrix.png'):
+    """Save confusion matrix visualization"""
+    confusion_matrix = metrics.confusion_matrix(true_labels, predictions)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(confusion_matrix, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Confusion matrix saved to {save_path}")
+    
+    # Print classification report
+    print("\nClassification Report:")
+    print(metrics.classification_report(true_labels, predictions, target_names=class_names))
 
-## Confusion Matrix
-# The matrix should be a 7-by-7 grid showing which categories of images were classified. 
-# Use your confusion matrix to additionally report precision and recall for each of the 7 classes, as well as the overall accuracy of your model.
+def save_misclassified_examples(test_dataset, predictions, true_labels, class_names, save_path='misclassified_examples.png'):
+    """Save visualization of misclassified examples"""
+    misclassified_indices = np.where(np.array(predictions) != np.array(true_labels))[0]
+    
+    if len(misclassified_indices) == 0:
+        print("No misclassified examples found!")
+        return
+        
+    n_examples = min(3, len(misclassified_indices))
+    misclassified_images = []
 
-    ##########################
-    ##########################
-    # Your code to implement #
-confusion_matrix = metrics.confusion_matrix(true_labels, predictions)
-plt.figure(figsize=(10, 8))
-sns.heatmap(confusion_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=desired_class_order, yticklabels=desired_class_order)
-plt.xlabel('Predicted Labels')
-plt.ylabel('True Labels')
-plt.title('Confusion Matrix')
-plt.show()
+    for idx in misclassified_indices[:n_examples]:
+        img_path, true_label = test_dataset.samples[idx]
+        predicted_label = predictions[idx]
+        image = Image.open(img_path).convert('L')
+        misclassified_images.append((image, true_label, predicted_label))
 
-print(metrics.classification_report(true_labels, predictions, target_names=desired_class_order))
+    plt.figure(figsize=(15, 5))
+    for i, (img, true_label, predicted_label) in enumerate(misclassified_images):
+        plt.subplot(1, 3, i + 1)
+        plt.imshow(img, cmap='gray')
+        plt.title(f"True: {class_names[true_label]}\nPred: {class_names[predicted_label]}")
+        plt.axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"Misclassified examples saved to {save_path}")
 
-    ##########################
-    ##########################
+# Save training plot
+save_training_plot(train_accuracies, val_accuracies)
 
-## Misclassified Image Visualization
-# Include 3 visualizations of images that were misclassified by your best-performing model. 
-# You will have to create or use a program that get the misclassified images and translate it into a grayscale image and show.
+# Save confusion matrix
+save_confusion_matrix(true_labels, predictions, desired_class_order)
 
-    ##########################
-    ##########################
-    # Your code to implement #
-misclassified_indices = np.where(np.array(predictions) != np.array(true_labels))[0]
-misclassified_images = []
-
-for idx in misclassified_indices[:3]:
-    img_path, true_label = test_dataset.samples[idx]
-    predicted_label = predictions[idx]
-
-    image = Image.open(img_path).convert('L')
-    misclassified_images.append((image, true_label, predicted_label))
-
-plt.figure(figsize=(15, 5))
-for i, (img, true_label, predicted_label) in enumerate(misclassified_images):
-    plt.subplot(1, 3, i + 1)
-    plt.imshow(img, cmap='gray')
-    plt.title(f"True: {desired_class_order[true_label]}, Predicted: {desired_class_order[predicted_label]}")
-    plt.axis('off')
-plt.show()
-    ##########################
-    ##########################
+# Save misclassified examples
+save_misclassified_examples(test_dataset, predictions, true_labels, desired_class_order)
